@@ -1,63 +1,95 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# Copyright (C) 2015-2020 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
-# 
-# Modified by alkalim (https://github.com/alkalim) for use by monitoring
-# * show peer names from wireguard-install.sh (https://github.com/Nyr/wireguard-install)
-# * remove sensitive information (private keys)
-# * change peer format for easier processing
-#
+# Modified for Zabbix LLD by alkalim + community
+# Output format: {"data": [ { "{#PEERNO}": "...", "{#PUBLIC_KEY}": "...", ... } ] }
 
-wgcnf=/etc/wireguard/wg0.conf
+wgcnf=/etc/wireguard/wg_main.conf  # ← измените на ваш конфиг!
 exec < <(exec sudo wg show all dump)
 
 peerno=1
-printf '{'
+printf '{\n\t"data": ['
+delim=""
+
 while read -r -d $'\t' device; do
-	if [[ $device != "$last_device" ]]; then
-		[[ -z $last_device ]] && printf '\n' || printf '%s,\n' "$end"
-		last_device="$device"
-		read -r private_key public_key listen_port fwmark
-		printf '\t"%s": {' "$device"
-		delim=$'\n'
-		[[ $public_key == "(none)" ]] || { printf '%s\t\t"publicKey": "%s"' "$delim" "$public_key"; delim=$',\n'; }
-		[[ $listen_port == "0" ]] || { printf '%s\t\t"listenPort": %u' "$delim" $(( $listen_port )); delim=$',\n'; }
-		[[ $fwmark == "off" ]] || { printf '%s\t\t"fwmark": %u' "$delim" $(( $fwmark )); delim=$',\n'; }
-		printf '%s\t\t"peers": [' "$delim"; end=$'\n\t\t]\n\t}'
-		delim=$'\n'
-	else
-		read -r public_key preshared_key endpoint allowed_ips latest_handshake transfer_rx transfer_tx persistent_keepalive
-		# printf '%s\t\t\t"%s": {' "$delim" "$public_key"
-		printf '%s\t\t\t{' "$delim"
-		delim=$'\n'
-		[[ $public_key == "(none)" ]] || { printf '%s\t\t\t\t"publicKey": "%s"' "$delim" "$public_key"; delim=$',\n'; }
-		{ printf '%s\t\t\t\t"peerNo": "%s"' "$delim" "$peerno"; delim=$',\n'; peerno=$((peerno+1)); }
-		[[ $endpoint == "(none)" ]] || { printf '%s\t\t\t\t"endpoint": "%s"' "$delim" "$endpoint"; delim=$',\n'; }
-		[[ $latest_handshake == "0" ]] || { printf '%s\t\t\t\t"latestHandshake": %u' "$delim" $(( $latest_handshake )); delim=$',\n'; }
-		[[ $transfer_rx == "0" ]] || { printf '%s\t\t\t\t"transferRx": %u' "$delim" $(( $transfer_rx )); delim=$',\n'; }
-		[[ $transfer_tx == "0" ]] || { printf '%s\t\t\t\t"transferTx": %u' "$delim" $(( $transfer_tx )); delim=$',\n'; }
-		[[ $persistent_keepalive == "off" ]] || { printf '%s\t\t\t\t"persistentKeepalive": %u' "$delim" $(( $persistent_keepalive )); delim=$',\n'; }
-		peer=$(awk '/PublicKey\s*=\s*(.*)$/{key=$3}/END_PEER/{print key,$3}' $wgcnf|grep $public_key|cut -d' ' -f2)
-		[[ -z $peer ]] || { printf '%s\t\t\t\t"peerName": "%s"' "$delim" "$peer"; delim=$',\n'; }
-		printf '%s\t\t\t\t"allowedIps": [' "$delim"
-		delim=$'\n'
-		if [[ $allowed_ips != "(none)" ]]; then
-			old_ifs="$IFS"
-			IFS=,
-			for ip in $allowed_ips; do
-				printf '%s\t\t\t\t\t"%s"' "$delim" "$ip"
-				delim=$',\n'
-			done
-			IFS="$old_ifs"
-			delim=$'\n'
-		fi
-		printf '%s\t\t\t\t]' "$delim"
-		printf '\n\t\t\t}'
-		delim=$',\n'
+	read -r public_key preshared_key endpoint allowed_ips latest_handshake transfer_rx transfer_tx persistent_keepalive
+
+	# Пропускаем запись самого интерфейса (публичный ключ отсутствует)
+	if [[ "$public_key" == "(none)" ]]; then
+		continue
 	fi
 
+	# Получаем имя пира из конфига (если есть)
+	peer_name=""
+	if [[ -f "$wgcnf" ]]; then
+		# Ищем блок [Peer] с PublicKey = $public_key и извлекаем комментарий (# name) или имя файла
+		peer_name=$(awk -v pk="$public_key" '
+			BEGIN { in_peer=0; name="" }
+			/^\[Peer\]/ { in_peer=1; next }
+			in_peer && /PublicKey\s*=\s*'${pk//\//\\/}'/ { found=1; next }
+			found && /^#/ { 
+				gsub(/^#\s*/, "", $0); 
+				name = $0; 
+				exit 
+			}
+			/^\[/ && !/^\[Peer\]/ { in_peer=0; found=0 }
+			END { print name }
+		' "$wgcnf")
+	fi
 
+	# Экранируем кавычки в endpoint и peer_name
+	endpoint_safe="${endpoint//\"/\\\"}"
+	peer_name_safe="${peer_name//\"/\\\"}"
+
+	# Начало объекта пира
+	printf '%s\n\t\t{' "$delim"
+	delim2=""
+
+	# {#PEERNO}
+	printf '%s\n\t\t\t"{#PEERNO}": "%s"' "$delim2" "$peerno"
+	delim2=","
+
+	# {#PUBLIC_KEY}
+	printf '%s\n\t\t\t"{#PUBLIC_KEY}": "%s"' "$delim2" "$public_key"
+	delim2=","
+
+	# {#ENDPOINT}
+	if [[ "$endpoint" != "(none)" ]]; then
+		printf '%s\n\t\t\t"{#ENDPOINT}": "%s"' "$delim2" "$endpoint_safe"
+		delim2=","
+	fi
+
+	# {#LATEST_HANDSHAKE}
+	if [[ "$latest_handshake" != "0" ]]; then
+		printf '%s\n\t\t\t"{#LATEST_HANDSHAKE}": %s' "$delim2" "$latest_handshake"
+		delim2=","
+	fi
+
+	# {#RX}, {#TX}
+	if [[ "$transfer_rx" != "0" ]]; then
+		printf '%s\n\t\t\t"{#RX}": %s' "$delim2" "$transfer_rx"
+		delim2=","
+	fi
+	if [[ "$transfer_tx" != "0" ]]; then
+		printf '%s\n\t\t\t"{#TX}": %s' "$delim2" "$transfer_tx"
+		delim2=","
+	fi
+
+	# {#PEER_NAME}
+	if [[ -n "$peer_name" ]]; then
+		printf '%s\n\t\t\t"{#PEER_NAME}": "%s"' "$delim2" "$peer_name_safe"
+		delim2=","
+	fi
+
+	# {#ALLOWED_IPS} — как строка через запятую
+	if [[ "$allowed_ips" != "(none)" ]]; then
+		allowed_str="${allowed_ips//\"/\\\"}"
+		printf '%s\n\t\t\t"{#ALLOWED_IPS}": "%s"' "$delim2" "$allowed_str"
+	fi
+
+	printf '\n\t\t}'
+	peerno=$((peerno + 1))
+	delim=","
 done
-printf '%s\n' "$end"
-printf '}\n'
+
+printf '\n\t]\n}\n'
